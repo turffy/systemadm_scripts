@@ -1,0 +1,135 @@
+#!/usr/bin/ksh
+
+
+if (( ${#} != 1 ))
+then
+    echo " Usage: $0 control_file"
+    exit
+else
+    controlFile=${1}
+    i=1
+    while read line[$i]
+    do
+        (( i += 1 ))
+    done < ${controlFile}
+fi
+
+# first line of the control file will have userid
+FTPUSER=${line[1]}
+
+# second line of the control file will have ip address
+FTPHOST=${line[2]}
+
+# third line of the control file will have the user for encrypt 
+GPGUSER=${line[3]}
+
+# forth line of the control file will have path of the account directories
+ATTACHPATH=${line[4]}
+
+# fifth line of the control file will have path of ram disk directories
+RAMPATH=${line[5]}
+
+# sixth line of the control file will have path of sftp server
+FTPPATH=${line[6]}
+
+# seveth line will have the vendor name
+VENDOR_NAME=${line[7]}
+
+#if [[ "`id | grep ${FTPUSER}`" = "" ]]
+#then
+    #echo "\n${0} must be run as ${FTPUSER} - exiting:\n"
+    #exit
+#fi
+
+ScriptFile="${ATTACHPATH}/logs/${VENDOR_NAME}/attach.list"
+TempLog="${ATTACHPATH}/logs/${VENDOR_NAME}/attach.log"
+ErrorLog="${ATTACHPATH}/logs/${VENDOR_NAME}/attach.week`date +%W`.log"
+FileList="${ATTACHPATH}/logs/${VENDOR_NAME}/fromfile.list"
+FtpTransferMsg="Fetching"
+FtpUploadMsg="Uploading"
+FtpCmd="sftp -b - "
+sshPerCmd="/oasis/bin/sshPersistent ${FTPUSER} ${FTPHOST}"
+
+export HOME="/home/${GPGUSER}"
+export GNUPGHOME="/home/${GPGUSER}/.gnupg"
+
+FALSE=0
+TRUE=1
+checkErrorLog=FALSE
+
+if [[ ! -f ${ErrorLog} ]]
+then
+    > ${ErrorLog}
+fi
+chmod 644 ${ErrorLog}
+
+while :
+do
+    # Start a new error log each Monday
+    day=`date +%a`
+    if [[ ${day} == "Mon" ]] && (( checkErrorLog == FALSE ))
+    then
+        currentWeek=week`date +%W`
+        logWeek=`basename ${ErrorLog} | cut -f2 -d'.'`
+        if [[ ${currentWeek} != ${logWeek} ]]
+        then
+            ErrorLog="${ATTACHPATH}/logs/${VENDOR_NAME}/attach.week.${currentWeek}.log"
+            > ${ErrorLog}
+            chmod 644 ${ErrorLog}
+            checkErrorLog=TRUE
+        fi
+    elif [[ ${day} == "Tue" ]] && (( checkErrorLog == TRUE ))
+    then
+        checkErrorLog=FALSE
+    fi
+
+    ATTACHMENTS="n"
+    
+    # Check for file attachment in Portal.
+    echo "-cd ${FTPPATH}" > ${ScriptFile}
+    echo "-ls -l" >> ${ScriptFile}
+    echo "bye" >> ${ScriptFile}
+    ${FtpCmd} ${FTPUSER}@${FTPHOST} < ${ScriptFile} > ${ATTACHPATH}/logs/${VENDOR_NAME}/tmp_list
+
+    grep -v "sftp>" ${ATTACHPATH}/logs/${VENDOR_NAME}/tmp_list | awk '{print $9}'> ${ATTACHPATH}/logs/${VENDOR_NAME}/pickup_list
+    num_files=`cat ${ATTACHPATH}/logs/${VENDOR_NAME}/pickup_list | wc -l`
+
+	if [[ ${num_files} -ge 1 ]];then
+
+	cd /ibmdbms/IBM.CISCO
+	while read line
+	do
+	   /usr/lpp/uv/bin/uv "PHANTOM PORTAL.ATTACHMENT $line IBM.CISCO"
+	   sleep 5 
+    done < ${ATTACHPATH}/logs/${VENDOR_NAME}/pickup_list 
+	   ATTACHMENTS="y"
+    fi
+
+
+    # Check for attachments
+    if [[ ${ATTACHMENTS} == "y" ]]
+    then
+        ls -1 ${ATTACHPATH}/attachments/${VENDOR_NAME} > ${FileList}
+        
+		while read filename
+        do
+            newfilename=`cat ${ATTACHPATH}/attachments/${VENDOR_NAME}/$filename`
+            echo "lcd ${RAMPATH}/fromattachments" > ${ScriptFile}
+            echo "-cd ${FTPPATH}" >> ${ScriptFile}
+            echo "-get $filename $newfilename" >> ${ScriptFile}
+            echo "! /usr/local/bin/gpg --batch --no-tty --skip-verify --no-secmem-warning --encrypt --recipient 5E96A617 --output ${ATTACHPATH}/attachments/active/${newfilename}.gpg ${RAMPATH}/fromattachments/${newfilename} > /dev/null" >>${ScriptFile}
+            echo "! chmod 666 ${ATTACHPATH}/attachments/active/${newfilename}.gpg" >>${ScriptFile}
+            echo "! rm ${RAMPATH}/fromattachments/${newfilename}" >> ${ScriptFile}
+            echo "! rm ${ATTACHPATH}/attachments/${VENDOR_NAME}/$filename" >> ${ScriptFile}
+            echo "-rm $filename" >> ${ScriptFile}
+            echo "bye" >> ${ScriptFile}
+            ${FtpCmd} ${FTPUSER}@${FTPHOST} < ${ScriptFile} >> ${TempLog}
+            cp ${ATTACHPATH}/attachments/active/${newfilename}.gpg /oasis/transferattachments/`echo ${ATTACHPATH}/attachments/active/${newfilename}.gpg | tr '/' '%'`.dat
+            mv /oasis/transferattachments/`echo ${ATTACHPATH}/attachments/active/${newfilename}.gpg | tr '/' '%'`.dat /oasis/transferattachments/`echo ${ATTACHPATH}/attachments/active/${newfilename}.gpg | tr '/' '%'`
+            chmod 666 /oasis/transferattachments/`echo ${ATTACHPATH}/attachments/active/${newfilename}.gpg | tr '/' '%'`
+        done <${FileList}
+
+        echo "Returned from SFTP Get attachments\n" >> ${TempLog}
+    fi
+    sleep 300 
+done
